@@ -13,8 +13,8 @@ set -euo pipefail
 QTDATA_CLI="${QTDATA_CLI:-qtcloud-data}"
 PIPELINE="${PIPELINE:-csv-standard}"
 WORKDIR="${WORKDIR:-/tmp/qtcloud-data}"
-PIPELINES_DIR="${PIPELINES_DIR:-.quanttide/data/pipelines}"
-BLUEPRINTS_DIR="${BLUEPRINTS_DIR:-.quanttide/data/blueprints}"
+PIPELINE_DIR="${PIPELINE_DIR:-.quanttide/data/pipeline}"
+BLUEPRINT_DIR="${BLUEPRINT_DIR:-.quanttide/data/blueprint}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; NC='\033[0m'
 info()  { echo -e "${CYAN}▶${NC} $1"; }
@@ -29,10 +29,10 @@ resolve_pipeline() {
   [ -f "$name" ] && { echo "$name"; return; }
   [[ "$name" == *,* ]] && { echo "$name"; return; }
 
-  if command -v cue &>/dev/null && [ -d "$PIPELINES_DIR" ]; then
+  if command -v cue &>/dev/null && [ -d "$PIPELINE_DIR" ]; then
     local key; key=$(to_camel "$name")
     local steps
-    steps=$(cue export --out yaml --expression "${key}.steps" "$PIPELINES_DIR" 2>/dev/null \
+    steps=$(cue export --out yaml --expression "${key}.steps" "$PIPELINE_DIR" 2>/dev/null \
       | grep 'command:' | sed 's/.*command: //;s/"//g' | tr '\n' ',' | sed 's/,$//')
     [ -n "$steps" ] && { echo "$steps"; return; }
   fi
@@ -45,7 +45,7 @@ resolve_blueprint_pipeline() {
   command -v cue &>/dev/null || fail "需要 cue"
   local key; key=$(to_camel "$name")
   local pipe
-  pipe=$(cue export --out yaml --expression "${key}.pipeline" "$BLUEPRINTS_DIR" 2>/dev/null \
+  pipe=$(cue export --out yaml --expression "${key}.pipeline" "$BLUEPRINT_DIR" 2>/dev/null \
     | sed 's/^"//;s/"$//')
   [ -n "$pipe" ] || fail "Blueprint $name 中未定义 pipeline"
   echo "$pipe"
@@ -171,14 +171,14 @@ case "${1:-help}" in
     ;;
   pipeline)
     case "${2:-help}" in
-      list|ls) list_from_cue "$PIPELINES_DIR" "Pipeline" ;;
-      show) [ -n "${3:-}" ] && show_from_cue "$PIPELINES_DIR" "$3" || fail "用法: qtdata-cli pipeline show <name>" ;;
+      list|ls) list_from_cue "$PIPELINE_DIR" "Pipeline" ;;
+      show) [ -n "${3:-}" ] && show_from_cue "$PIPELINE_DIR" "$3" || fail "用法: qtdata-cli pipeline show <name>" ;;
       *) echo "用法: qtdata-cli pipeline list|show <name>" ;;
     esac ;;
   blueprint)
     case "${2:-help}" in
-      list|ls) list_from_cue "$BLUEPRINTS_DIR" "Blueprint" ;;
-      show) [ -n "${3:-}" ] && show_from_cue "$BLUEPRINTS_DIR" "$3" || fail "用法: qtdata-cli blueprint show <name>" ;;
+      list|ls) list_from_cue "$BLUEPRINT_DIR" "Blueprint" ;;
+      show) [ -n "${3:-}" ] && show_from_cue "$BLUEPRINT_DIR" "$3" || fail "用法: qtdata-cli blueprint show <name>" ;;
       *) echo "用法: qtdata-cli blueprint list|show <name>" ;;
     esac ;;
   demo) demo ;;
@@ -194,7 +194,7 @@ case "${1:-help}" in
     echo "  QTDATA_CLI=qtcloud-data     CLI 路径"
     echo "  PIPELINE=csv-standard        默认 pipeline"
     echo "  WORKDIR=/tmp/qtcloud-data        临时目录"
-    echo "  PIPELINES_DIR=.quanttide/data/pipelines    管道定义"
-    echo "  BLUEPRINTS_DIR=.quanttide/data/blueprints  蓝图定义"
+    echo "  PIPELINE_DIR=.quanttide/data/pipeline    管道定义"
+    echo "  BLUEPRINT_DIR=.quanttide/data/blueprint  蓝图定义"
     ;;
 esac
