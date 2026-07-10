@@ -3,7 +3,7 @@ mod dropbox;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "dropbox", about = "Dropbox 数据传输工具")]
+#[command(name = "dropbox", about = "基于 Dropbox 的客户数据传输工具")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -11,23 +11,23 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// 从 Dropbox 下载文件
-    Pull {
-        /// Dropbox 上的远程路径，如 /data/input.csv
+    /// 接收：从客户共享目录下载文件
+    Receive {
+        /// 客户共享目录路径，如 /Customers/ABC/input.csv
         remote_path: String,
         /// 本地保存路径，默认与远程文件名相同
         local_path: Option<String>,
     },
-    /// 上传文件到 Dropbox
-    Push {
+    /// 交付：上传处理结果到客户共享目录
+    Deliver {
         /// 本地文件路径
         local_path: String,
-        /// Dropbox 上的远程路径，如 /data/output.csv
+        /// 客户共享目录路径，如 /Customers/ABC/output.csv
         remote_path: String,
     },
-    /// 列出 Dropbox 文件夹内容
+    /// 列出客户目录内容
     Ls {
-        /// 远程文件夹路径，默认为 /
+        /// 远程文件夹路径，默认为 /Customers
         path: Option<String>,
     },
 }
@@ -40,7 +40,7 @@ async fn main() {
         std::env::var("DROPBOX_ACCESS_TOKEN").expect("请设置 DROPBOX_ACCESS_TOKEN 环境变量");
 
     match &cli.command {
-        Commands::Pull {
+        Commands::Receive {
             remote_path,
             local_path,
         } => {
@@ -53,14 +53,14 @@ async fn main() {
             });
             dropbox::download(&token, remote_path, &path).await;
         }
-        Commands::Push {
+        Commands::Deliver {
             local_path,
             remote_path,
         } => {
             dropbox::upload(&token, local_path, remote_path).await;
         }
         Commands::Ls { path } => {
-            let p = path.as_deref().unwrap_or("");
+            let p = path.as_deref().unwrap_or("/Customers");
             dropbox::list_files(&token, p).await;
         }
     }
