@@ -11,24 +11,37 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// 接收：从客户共享目录下载文件
+    /// 接收：从客户（共享链接或本地文件）存到自己的网盘
     Receive {
-        /// 客户共享目录路径，如 /Customers/ABC/input.csv
-        remote_path: String,
-        /// 本地保存路径，默认与远程文件名相同
-        local_path: Option<String>,
+        /// 客户共享链接，或本地文件路径
+        source: String,
+        /// 存到 Dropbox 的路径，如 /Customers/ABC/raw.csv
+        /// 不指定则自动生成路径
+        destination: Option<String>,
     },
-    /// 交付：上传处理结果到客户共享目录
+    /// 交付：将结果上传到自己的网盘，输出分享链接
     Deliver {
-        /// 本地文件路径
-        local_path: String,
-        /// 客户共享目录路径，如 /Customers/ABC/output.csv
-        remote_path: String,
+        /// 本地结果文件路径
+        file: String,
+        /// Dropbox 存储路径，如 /Customers/ABC/result.csv
+        /// 不指定则用文件名
+        remote_path: Option<String>,
+        /// 直接打印分享链接（不写入文件）
+        #[arg(long)]
+        print: bool,
+        /// 将分享链接写入文件
+        #[arg(long)]
+        output: Option<String>,
     },
-    /// 列出客户目录内容
+    /// 列出自己网盘中的客户目录
     Ls {
-        /// 远程文件夹路径，默认为 /Customers
+        /// 目录路径，默认为 /Customers
         path: Option<String>,
+    },
+    /// 生成文件的分享链接
+    Share {
+        /// Dropbox 中的文件路径
+        path: String,
     },
 }
 
@@ -41,27 +54,55 @@ async fn main() {
 
     match &cli.command {
         Commands::Receive {
-            remote_path,
-            local_path,
+            source,
+            destination,
         } => {
-            let path = local_path.clone().unwrap_or_else(|| {
-                remote_path
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("download")
-                    .to_string()
+            let dest = destination.clone().unwrap_or_else(|| {
+                format!(
+                    "/Customers/incoming/{}",
+                    source.rsplit('/').next().unwrap_or("unknown")
+                )
             });
-            dropbox::download(&token, remote_path, &path).await;
+            dropbox::store(&token, source, &dest).await;
+            println!("✓ 已存到自己的网盘: {dest}");
         }
         Commands::Deliver {
-            local_path,
+            file,
             remote_path,
+            print,
+            output,
         } => {
-            dropbox::upload(&token, local_path, remote_path).await;
+            let path = remote_path.clone().unwrap_or_else(|| {
+                format!(
+                    "/Customers/deliver/{}",
+                    file.rsplit('/').next().unwrap_or("result")
+                )
+            });
+            dropbox::upload(&token, file, &path).await;
+
+            // 生成分享链接
+            let link = dropbox::create_shared_link(&token, &path).await;
+            match link {
+                Ok(url) => {
+                    if *print {
+                        println!("{url}");
+                    } else if let Some(out) = output {
+                        std::fs::write(out, &url).expect("写入链接文件失败");
+                        println!("✓ 分享链接已写入: {out}");
+                    } else {
+                        println!("📎 客户下载链接: {url}");
+                    }
+                }
+                Err(e) => eprintln!("⚠ 文件已上传，但生成分享链接失败: {e}"),
+            }
         }
         Commands::Ls { path } => {
             let p = path.as_deref().unwrap_or("/Customers");
             dropbox::list_files(&token, p).await;
         }
+        Commands::Share { path } => match dropbox::create_shared_link(&token, path).await {
+            Ok(url) => println!("{url}"),
+            Err(e) => eprintln!("生成分享链接失败: {e}"),
+        },
     }
 }

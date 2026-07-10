@@ -4,33 +4,46 @@ use std::fs;
 const DROPBOX_API: &str = "https://api.dropboxapi.com/2";
 const DROPBOX_CONTENT: &str = "https://content.dropboxapi.com/2";
 
-pub async fn download(token: &str, remote_path: &str, local_path: &str) {
+/// 存到自己的网盘：从本地文件或客户共享链接下载后上传到 Dropbox
+pub async fn store(token: &str, source: &str, destination: &str) {
+    let data = if source.starts_with("http://") || source.starts_with("https://") {
+        // 从共享链接下载
+        let client = Client::new();
+        let resp = client.get(source).send().await.expect("从链接下载失败");
+        let bytes = resp.bytes().await.expect("读取响应失败");
+        println!("  已从链接下载 ({} 字节)", bytes.len());
+        bytes.to_vec()
+    } else {
+        // 从本地文件读取
+        fs::read(source).expect("读取本地文件失败")
+    };
+
     let client = Client::new();
-    let body = serde_json::json!({ "path": remote_path });
+    let arg = serde_json::json!({
+        "path": destination,
+        "mode": "overwrite",
+    });
 
     let resp = client
-        .post(format!("{DROPBOX_CONTENT}/files/download"))
+        .post(format!("{DROPBOX_CONTENT}/files/upload"))
         .header("Authorization", format!("Bearer {token}"))
-        .header("Dropbox-API-Arg", body.to_string())
+        .header("Dropbox-API-Arg", arg.to_string())
+        .header("Content-Type", "application/octet-stream")
+        .body(data.clone())
         .send()
         .await
-        .expect("下载请求失败");
+        .expect("上传请求失败");
 
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        eprintln!("下载失败 [{status}]: {text}");
-        return;
+        panic!("上传失败 [{status}]: {text}");
     }
 
-    let bytes = resp.bytes().await.expect("读取响应失败");
-    fs::write(local_path, &bytes).expect("写入本地文件失败");
-    println!(
-        "✓ 已下载: {remote_path} → {local_path} ({} 字节)",
-        bytes.len()
-    );
+    println!("  ✓ 已存到: {destination} ({} 字节)", data.len());
 }
 
+/// 上传文件到 Dropbox（内部用）
 pub async fn upload(token: &str, local_path: &str, remote_path: &str) {
     let data = fs::read(local_path).expect("读取本地文件失败");
     let client = Client::new();
@@ -53,20 +66,50 @@ pub async fn upload(token: &str, local_path: &str, remote_path: &str) {
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        eprintln!("上传失败 [{status}]: {text}");
-        return;
+        panic!("上传失败 [{status}]: {text}");
     }
 
     println!(
-        "✓ 已上传: {local_path} → {remote_path} ({} 字节)",
+        "  ✓ 已上传: {local_path} → {remote_path} ({} 字节)",
         data.len()
     );
 }
 
+/// 生成分享链接
+pub async fn create_shared_link(token: &str, path: &str) -> Result<String, String> {
+    let client = Client::new();
+    let body = serde_json::json!({
+        "path": path,
+        "settings": { "requested_visibility": { ".tag": "public" } }
+    });
+
+    let resp = client
+        .post(format!(
+            "{DROPBOX_API}/sharing/create_shared_link_with_settings"
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {e}"))?;
+
+    let json: serde_json::Value = resp.json().await.map_err(|e| format!("解析失败: {e}"))?;
+
+    if let Some(url) = json["url"].as_str() {
+        // 将 ?dl=0 改为 ?dl=1 使其直接下载
+        Ok(url.replace("?dl=0", "?dl=1"))
+    } else if let Some(error) = json["error_summary"].as_str() {
+        Err(error.to_string())
+    } else {
+        Err(format!("未知响应: {json}"))
+    }
+}
+
+/// 列出目录内容
 pub async fn list_files(token: &str, path: &str) {
     let client = Client::new();
     let body = serde_json::json!({
-        "path": if path.is_empty() { "" } else { path },
+        "path": path,
         "recursive": false,
     });
 
