@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 # qtdata-cli — 量潮数据处理流程编排实验
 #
-# 模拟上层 CLI 串联 qtcloud-data-cli 完成完整的数据处理流程：
-#   接收 → 处理 → 交付
+# 串联 receive → pipeline (step1 → step2 → ...) → send
 #
 # 用法:
-#   qtdata-cli process <customer-id> <source-url>
-#   qtdata-cli demo                     # 运行预设的 mock 演示
+#   qtdata-cli process <customer-id> <source-url> [--pipeline step1,step2...]
+#   qtdata-cli demo
 
 set -euo pipefail
 
 QTDATA_CLI="${QTDATA_CLI:-qtcloud-data}"
-PROCESSOR="${PROCESSOR:-./bin/processor.py}"
+PIPELINE="${PIPELINE:-./bin/processor.py}"
 WORKDIR="${WORKDIR:-./work}"
 
 # ── 颜色 ──
@@ -20,51 +19,81 @@ info()  { echo -e "${CYAN}▶${NC} $1"; }
 ok()    { echo -e "${GREEN}✓${NC} $1"; }
 fail()  { echo -e "${RED}✗${NC} $1"; exit 1; }
 
-# ── 确保依赖 ──
-check_deps() {
-    command -v "$QTDATA_CLI" >/dev/null || fail "需要 qtcloud-data CLI，请先安装或设置 QTDATA_CLI"
-    command -v python3 >/dev/null || fail "需要 python3"
+# ── 运行 Pipeline ──
+run_pipeline() {
+    local input="$1"
+    local output_dir="$2"
+    local pipeline_spec="$3"
+    local final_output
+
+    IFS=',' read -ra steps <<< "$pipeline_spec"
+    local prev="$input"
+
+    for i in "${!steps[@]}"; do
+        local step="${steps[$i]}"
+        local step_name
+        step_name=$(basename "$step" .py)
+
+        if [ $i -eq $((${#steps[@]} - 1)) ]; then
+            final_output="${output_dir}/final.csv"
+        else
+            final_output="${output_dir}/step_${i}_${step_name}.csv"
+        fi
+
+        info "  Pipeline Step $((i+1))/${#steps[@]}: $step_name"
+        if [[ "$step" == *.py ]]; then
+            python3 "$step" "$prev" "$final_output"
+        elif [[ "$step" == *.sh ]]; then
+            bash "$step" "$prev" "$final_output"
+        else
+            "$step" "$prev" "$final_output"
+        fi
+        prev="$final_output"
+    done
+
+    echo "$final_output"
 }
 
-# ── 处理流程 ──
+# ── 完整流程 ──
 process() {
     local customer_id="$1"
     local source_url="$2"
-    local work_dir="${WORKDIR}/${customer_id}"
+    local pipeline_spec="${PIPELINE}"
 
+    # 解析可选 --pipeline 覆盖
+    if [ $# -ge 4 ] && [ "$3" = "--pipeline" ]; then
+        pipeline_spec="$4"
+    fi
+
+    local work_dir="${WORKDIR}/${customer_id}"
     mkdir -p "$work_dir"
 
     echo ""
     echo "══════════════════════════════════════════════"
     echo "  客户: $customer_id"
     echo "  来源: $source_url"
+    echo "  Pipeline: $pipeline_spec"
     echo "══════════════════════════════════════════════"
     echo ""
 
-    # ── Step 1: 接收 ──
-    info "Step 1/3: 接收客户数据"
+    # Step 1: 接收
+    info "Step 1: 接收客户数据"
     local raw_file="${work_dir}/raw.csv"
     $QTDATA_CLI transfer receive "$source_url" --output "$raw_file"
     ok "已接收: $raw_file"
     echo ""
 
-    # ── Step 2: 处理 ──
-    info "Step 2/3: 处理数据"
-    local processed_file="${work_dir}/processed.csv"
-    if [ -f "$PROCESSOR" ]; then
-        python3 "$PROCESSOR" "$raw_file" "$processed_file"
-    else
-        # 默认：CSV 转义 + 格式规范化（占位处理）
-        cp "$raw_file" "$processed_file"
-        info "使用默认处理（占位）"
-    fi
-    ok "已处理: $processed_file"
+    # Step 2: Pipeline
+    info "Step 2: 执行 Pipeline"
+    local result_file
+    result_file=$(run_pipeline "$raw_file" "$work_dir" "$pipeline_spec")
+    ok "Pipeline 完成"
     echo ""
 
-    # ── Step 3: 交付 ──
-    info "Step 3/3: 交付结果"
+    # Step 3: 交付
+    info "Step 3: 交付结果"
     local link_file="${work_dir}/share-link.txt"
-    $QTDATA_CLI transfer send "$processed_file" --output "$link_file"
+    $QTDATA_CLI transfer send "$result_file" --output "$link_file"
     ok "结果已交付"
     echo "  分享链接: $(cat "$link_file")"
     echo ""
@@ -72,12 +101,12 @@ process() {
     echo "────────────────────────────────────────────"
     ok "客户 $customer_id 流程完成"
     echo "  原始数据: $raw_file"
-    echo "  处理结果: $processed_file"
+    echo "  最终结果: $result_file"
     echo "  交付链接: $(cat "$link_file")"
     echo ""
 }
 
-# ── Mock 演示（不依赖真实 CLI） ──
+# ── Mock 演示 ──
 demo() {
     echo ""
     echo "══════════════════════════════════════════════"
@@ -88,35 +117,30 @@ demo() {
     local demo_dir="${WORKDIR}/demo"
     mkdir -p "$demo_dir"
 
-    # 准备 mock 数据
-    echo "col1,col2,col3" > "${demo_dir}/mock_input.csv"
-    echo "a,1,10" >> "${demo_dir}/mock_input.csv"
-    echo "b,2,20" >> "${demo_dir}/mock_input.csv"
-    echo "c,3,30" >> "${demo_dir}/mock_input.csv"
+    # mock 数据
+    echo "name,amount,note" > "${demo_dir}/mock_input.csv"
+    echo "alice,100,ok" >> "${demo_dir}/mock_input.csv"
+    echo "bob,200," >> "${demo_dir}/mock_input.csv"
+    echo "charlie,300,need review" >> "${demo_dir}/mock_input.csv"
 
     info "Mock 数据已准备: ${demo_dir}/mock_input.csv"
 
-    # 模拟 receive: 用本地文件代替实际下载
-    info "Step 1/3: 模拟接收"
+    # 模拟 receive
+    info "Step 1: 模拟接收"
     cp "${demo_dir}/mock_input.csv" "${demo_dir}/raw.csv"
     ok "已接收: ${demo_dir}/raw.csv"
     echo ""
 
-    # 处理
-    info "Step 2/3: 处理数据"
-    local processed="${demo_dir}/processed.csv"
-    if [ -f "$PROCESSOR" ]; then
-        python3 "$PROCESSOR" "${demo_dir}/raw.csv" "$processed"
-    else
-        # 模拟处理：加一行汇总
-        cp "${demo_dir}/raw.csv" "$processed"
-        echo "total,," >> "$processed"
-    fi
-    ok "已处理: $processed"
+    # Pipeline: 两步处理器
+    info "Step 2: 执行 Pipeline（校验 → 增强）"
+    local pipe_result
+    pipe_result=$(run_pipeline "${demo_dir}/raw.csv" "$demo_dir" \
+        "./bin/processor.py,./bin/enricher.py")
+    ok "Pipeline 完成: $pipe_result"
     echo ""
 
-    # 模拟 send: 输出假链接
-    info "Step 3/3: 模拟交付"
+    # 模拟 send
+    info "Step 3: 模拟交付"
     echo "https://console.qtcloud.com/delivery/demo-result" > "${demo_dir}/share-link.txt"
     ok "结果已交付"
     echo "  分享链接: https://console.qtcloud.com/delivery/demo-result"
@@ -127,32 +151,34 @@ demo() {
     echo "  工作目录: ${demo_dir}"
     echo ""
 
-    # 展示工作目录内容
-    info "工作目录文件:"
-    ls -la "${demo_dir}/"
+    info "中间产物:"
+    ls -la "${demo_dir}/" | grep -v '^total'
+    echo ""
+    info "最终输出:"
+    cat "${demo_dir}/final.csv"
     echo ""
 }
 
 # ── 命令分发 ──
 case "${1:-help}" in
     process)
-        [ $# -ge 3 ] || fail "用法: qtdata-cli process <customer-id> <source-url>"
+        [ $# -ge 3 ] || fail "用法: qtdata-cli process <客户ID> <来源URL> [--pipeline step1,step2...]"
         check_deps
-        process "$2" "$3"
+        process "$2" "$3" "${4:-}" "${5:-}"
         ;;
     demo)
         demo
         ;;
-    *)
+    help|*)
         echo "量潮数据处理编排实验"
         echo ""
         echo "用法:"
-        echo "  qtdata-cli process <客户ID> <数据来源URL>    执行完整流程"
-        echo "  qtdata-cli demo                             运行 mock 演示"
+        echo "  qtdata-cli process <ID> <URL> [--pipeline s1,s2...]  完整流程"
+        echo "  qtdata-cli demo                                      本地演示"
         echo ""
         echo "环境变量:"
-        echo "  QTDATA_CLI=qtcloud-data     CLI 命令路径"
-        echo "  PROCESSOR=./bin/processor.py 处理脚本路径"
-        echo "  WORKDIR=./work               工作目录"
+        echo "  QTDATA_CLI=qtcloud-data        CLI 命令路径"
+        echo "  PIPELINE=./bin/processor.py     Pipeline 步骤（逗号分隔）"
+        echo "  WORKDIR=./work                  工作目录"
         ;;
 esac
