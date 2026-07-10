@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
-"""SEC 信贷协议识别分类器实验
+"""Pipeline Step 2: 抽取证据 + 规则引擎分类
 
-基于 blueprint.cue 定义的分类策略：
-1. 解析 Exhibit metadata + text_head
-2. 抽取 evidence（title / role / section / term）
-3. 规则引擎判断 document_type
-4. 输出结构化结果 + confidence
+Input CSV:  file_name, title, form_type, exhibit_type, text_head
+Output CSV: file_name, document_type, is_target, confidence, evidence_json
 """
 
+import csv
 import json
 import re
 import sys
-from pathlib import Path
 
-
-# ── 强正/负特征模式 ──
 
 POSITIVE_PATTERNS = {
     "borrower": r"\bBorrower\b",
@@ -37,12 +32,6 @@ NEGATIVE_PATTERNS = {
 }
 
 TITLE_PATTERNS = {
-    "credit_agreement_original": [
-        r"^Credit Agreement$",
-        r"^Loan Agreement$",
-        r"Amended and Restated Credit Agreement",
-        r"First Lien Credit Agreement",
-    ],
     "credit_agreement_related_letter": [
         r"Consent Letter",
         r"Extension Consent",
@@ -57,6 +46,12 @@ TITLE_PATTERNS = {
         r"Commitment Extension",
         r"Maturity Date Extension",
     ],
+    "credit_agreement_original": [
+        r"^Credit Agreement$",
+        r"^Loan Agreement$",
+        r"Amended and Restated Credit Agreement",
+        r"First Lien Credit Agreement",
+    ],
     "indenture_or_notes": [
         r"^INDENTURE$",
         r"Indenture$",
@@ -65,146 +60,93 @@ TITLE_PATTERNS = {
 
 
 def extract_evidence(text: str) -> dict:
-    """抽取可解释证据"""
-    evidence = {
-        "title_evidence": [],
-        "role_evidence": [],
-        "section_topic_evidence": [],
-        "term_evidence": [],
-        "negative_evidence": [],
-    }
-
-    # Title evidence
+    evidence = {"title_evidence": [], "role_evidence": [], "negative_evidence": [], "term_evidence": []}
     lines = text.split("\n")
     title = lines[0].strip() if lines else ""
     for doc_type, patterns in TITLE_PATTERNS.items():
         for p in patterns:
             if re.search(p, title, re.IGNORECASE):
-                evidence["title_evidence"].append(f"title matches {doc_type}: {p}")
-
-    # Role evidence
+                evidence["title_evidence"].append(f"title matches {doc_type}")
     for name, pattern in POSITIVE_PATTERNS.items():
         if re.search(pattern, text):
-            evidence["role_evidence"].append(f"found positive: {name}")
-
-    # Negative evidence
+            evidence["role_evidence"].append(name)
     for name, pattern in NEGATIVE_PATTERNS.items():
         if re.search(pattern, text):
-            evidence["negative_evidence"].append(f"found negative: {name}")
-
-    # Term evidence
-    term_patterns = {
-        "interest_rate": r"\bInterest Rate\b",
-        "maturity_date": r"\bMaturity Date\b",
-        "revolving_credit": r"\bRevolving Credit\b",
-        "term_sofr": r"\bTerm SOFR\b",
-    }
+            evidence["negative_evidence"].append(name)
+    term_patterns = {"interest_rate": r"\bInterest Rate\b", "maturity_date": r"\bMaturity Date\b",
+                     "revolving_credit": r"\bRevolving Credit\b", "term_sofr": r"\bTerm SOFR\b"}
     for name, pattern in term_patterns.items():
         if re.search(pattern, text):
-            evidence["term_evidence"].append(f"found term: {name}")
-
+            evidence["term_evidence"].append(name)
     return evidence
 
 
 def classify(evidence: dict) -> dict:
-    """规则引擎：基于 evidence 判断 document_type"""
-    title_evidence = " ".join(evidence["title_evidence"]).lower()
+    title_evidence = evidence["title_evidence"]
     pos_count = len(evidence["role_evidence"])
     neg_count = len(evidence["negative_evidence"])
-    has_term = len(evidence["term_evidence"]) > 0
+    result = {"document_type": "other", "is_target": False, "confidence": 0.0}
 
-    result = {
-        "document_type": "other",
-        "is_target": False,
-        "confidence": 0.0,
-        "positive_evidence": evidence["role_evidence"] + evidence["term_evidence"],
-        "negative_evidence": evidence["negative_evidence"],
-    }
+    # 强负
+    if any("indenture" in e for e in evidence["negative_evidence"]) and \
+       any("trustee" in e for e in evidence["negative_evidence"]):
+        result["document_type"] = "indenture_or_notes"
+        result["is_target"] = False
+        result["confidence"] = 0.9
+        return result
 
-    # 强负：INDENTURE + Trustee + The Notes
-    if any("indenture" in e.lower() for e in evidence["negative_evidence"]):
-        if any("trustee" in e.lower() for e in evidence["negative_evidence"]):
-            result["document_type"] = "indenture_or_notes"
-            result["is_target"] = False
-            result["confidence"] = 0.9
-            return result
-
-    # 根据标题判断子类型（letter 优先于 extension）
-    for ev in evidence["title_evidence"]:
-        el = ev.lower()
+    # 标题匹配（letter 优先）
+    for e in title_evidence:
+        el = e.lower()
         if "letter" in el:
-            result["document_type"] = "credit_agreement_related_letter"
-            break
+            result["document_type"] = "credit_agreement_related_letter"; break
         if "amendment" in el:
-            result["document_type"] = "credit_agreement_amendment"
-            break
+            result["document_type"] = "credit_agreement_amendment"; break
         if "extension" in el:
-            result["document_type"] = "credit_agreement_extension"
-            break
+            result["document_type"] = "credit_agreement_extension"; break
         if "original" in el:
-            result["document_type"] = "credit_agreement_original"
-            break
+            result["document_type"] = "credit_agreement_original"; break
 
-    # 如果标题判断为其他，但证据充分
     if result["document_type"] == "other":
-        # 检查是否有 letter 特征
-        if any("letter" in e.lower() for e in evidence["title_evidence"]):
+        if "letter" in str(title_evidence).lower():
             result["document_type"] = "credit_agreement_related_letter"
-        elif pos_count >= 3 and has_term:
+        elif pos_count >= 3 and len(evidence["term_evidence"]) > 0:
             result["document_type"] = "credit_agreement_original"
 
-    # 计算 confidence
     if result["document_type"] != "other":
         total = pos_count + neg_count
-        if total > 0:
-            result["confidence"] = round(pos_count / (pos_count + neg_count), 2)
+        result["confidence"] = round(pos_count / (pos_count + neg_count), 2) if total > 0 else 0.5
         result["is_target"] = not result["document_type"].startswith("indenture")
 
     return result
 
 
-def run_exhibit(exhibit: dict) -> dict:
-    """处理单个 exhibit"""
-    text = f"{exhibit.get('title', '')}\n{exhibit.get('text_head', '')}\n"
-    text += "\n".join(exhibit.get("metadata", {}).values())
-
-    evidence = extract_evidence(text)
-    result = classify(evidence)
-    result["file_name"] = exhibit.get("file_name", "")
-    result["expected"] = exhibit.get("expected_type", "")
-    return result
-
-
 def main():
-    samples_dir = Path(__file__).parent / "samples"
-    results = []
+    input_path = sys.argv[1] if len(sys.argv) > 1 else "/dev/stdin"
+    output_path = sys.argv[2] if len(sys.argv) > 2 else "/dev/stdout"
 
-    for f in sorted(samples_dir.glob("*.json")):
-        with open(f) as fh:
-            exhibit = json.load(fh)
-        result = run_exhibit(exhibit)
-        results.append(result)
+    rows = []
+    with open(input_path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            text = f"{row.get('title', '')}\n{row.get('text_head', '')}\n"
+            evidence = extract_evidence(text)
+            result = classify(evidence)
+            row["document_type"] = result["document_type"]
+            row["is_target"] = str(result["is_target"])
+            row["confidence"] = str(result["confidence"])
+            row["evidence"] = json.dumps(evidence)
+            rows.append(row)
 
-        status = "✓" if result["document_type"] == result["expected"] else "✗"
-        print(f"{status} {result['file_name']}")
-        print(f"  预期: {result['expected']}")
-        print(f"  实际: {result['document_type']} (conf={result['confidence']})")
-        if result["positive_evidence"]:
-            print(f"  正证据: {result['positive_evidence'][:2]}")
-        if result["negative_evidence"]:
-            print(f"  负证据: {result['negative_evidence'][:2]}")
-        print()
+    with open(output_path, "w", newline="") as f:
+        fields = ["file_name", "document_type", "is_target", "confidence", "evidence",
+                   "title", "form_type", "exhibit_type", "text_head"]
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerows(rows)
 
-    # Summary
-    total = len(results)
-    passed = sum(1 for r in results if r["document_type"] == r["expected"])
-    print(f"{'='*40}")
-    print(f"结果: {passed}/{total} 通过 ({passed/total*100:.0f}%)")
-    if passed == total:
-        print("🎉 全部通过")
-    else:
-        print(f"⚠  {total - passed} 个未通过")
-        sys.exit(1)
+    summary = sum(1 for r in rows if r["document_type"] != "other")
+    print(f"  分类完成: {len(rows)} 个, {summary} 个为目标文件", file=sys.stderr)
 
 
 if __name__ == "__main__":

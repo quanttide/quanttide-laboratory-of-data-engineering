@@ -40,3 +40,20 @@ annotation: #Pipeline & {
 		command: "./bin/processor.py"
 	}]
 }
+
+// SEC 信贷协议识别：解析 Exhibit → 抽取证据 → LLM 分类
+secCredit: #Pipeline & {
+	name: "sec-credit"
+	description: "从 8-K 附件中分类筛选 Credit Agreement"
+
+	steps: [{
+		name:    "parse-exhibit"
+		command: "./experiments/sec-credit/parse_exhibit.py"
+	}, {
+		name:    "extract-evidence"
+		command: "./experiments/sec-credit/classifier.py"
+	}, {
+		name:    "llm-classify"
+		command: "./experiments/sec-credit/llm_classify.py"
+	}]
+}
