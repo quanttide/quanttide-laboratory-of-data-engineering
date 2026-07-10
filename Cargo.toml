@@ -1,0 +1,9 @@
+[package]
+name = "quanttide-laboratory"
+version = "0.1.0"
+edition = "2024"
+authors = ["QuantTide Inc. <opensource@quanttide.com>"]
+description = "QuantTide Laboratory of Data Engineering"
+license = "MIT"
+
+[dependencies]
