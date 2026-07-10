@@ -51,7 +51,7 @@ def process(input_path: str, output_path: str) -> None:
         writer.writerows(output)
 
     total = len(output) - 1  # 减去 header
-    print(f"  共 {total} 条记录, {errors} 条警告")
+    print(f"  共 {total} 条记录, {errors} 条警告", file=sys.stderr)
 
     if errors:
         sys.exit(1)

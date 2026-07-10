@@ -40,7 +40,7 @@ def enrich(input_path: str, output_path: str) -> None:
         writer.writeheader()
         writer.writerows(enriched)
 
-    print(f"  增强完成: {len(enriched)} 行, 追加空值统计/质量等级")
+    print(f"  增强完成: {len(enriched)} 行, 追加空值统计/质量等级", file=sys.stderr)
 
 
 if __name__ == "__main__":

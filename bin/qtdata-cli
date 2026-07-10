@@ -1,184 +1,230 @@
 #!/usr/bin/env bash
-# qtdata-cli — 量潮数据处理流程编排实验
-#
-# 串联 receive → pipeline (step1 → step2 → ...) → send
+# qtdata-cli — 量潮数据处理流程编排
+# receive → pipeline (step1 → step2 → ...) → send
 #
 # 用法:
-#   qtdata-cli process <customer-id> <source-url> [--pipeline step1,step2...]
+#   qtdata-cli process <customer-id> <source-url> [--pipeline <name>]
 #   qtdata-cli demo
+#   qtdata-cli pipeline list
+#   qtdata-cli pipeline show <name>
 
 set -euo pipefail
 
 QTDATA_CLI="${QTDATA_CLI:-qtcloud-data}"
-PIPELINE="${PIPELINE:-./bin/processor.py}"
+PIPELINE="${PIPELINE:-csv-standard}"
 WORKDIR="${WORKDIR:-./work}"
+PIPELINES_DIR="${PIPELINES_DIR:-./pipelines}"
 
-# ── 颜色 ──
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; NC='\033[0m'
 info()  { echo -e "${CYAN}▶${NC} $1"; }
 ok()    { echo -e "${GREEN}✓${NC} $1"; }
 fail()  { echo -e "${RED}✗${NC} $1"; exit 1; }
 
-# ── 运行 Pipeline ──
+# ── 将 kebab-case 转为 camelCase ──
+to_camel() {
+  echo "$1" | sed 's/-\(.\)/\U\1/g'
+}
+
+# ── 解析 pipeline 名称 → 逗号分隔的步骤命令列表 ──
+resolve_pipeline() {
+  local name="$1"
+
+  # 如果已经是可执行文件路径，直接返回
+  [ -f "$name" ] && { echo "$name"; return; }
+
+  # 如果是逗号分隔的步骤列表，直接返回
+  [[ "$name" == *,* ]] && { echo "$name"; return; }
+
+  # 从 CUE 文件查找
+  if command -v cue &>/dev/null && [ -d "$PIPELINES_DIR" ]; then
+    local cue_key
+    cue_key=$(to_camel "$name")
+    local steps
+    steps=$(cue export --out yaml --expression "${cue_key}.steps" "$PIPELINES_DIR" 2>/dev/null \
+      | grep 'command:' \
+      | sed 's/.*command: //;s/"//g' \
+      | tr '\n' ',' \
+      | sed 's/,$//')
+    [ -n "$steps" ] && { echo "$steps"; return; }
+  fi
+
+  fail "找不到 Pipeline: $name"
+}
+
+# ── 运行 pipeline 步骤链 ──
 run_pipeline() {
-    local input="$1"
-    local output_dir="$2"
-    local pipeline_spec="$3"
-    local final_output
+  local input="$1" output_dir="$2" pipeline_spec="$3"
+  local prev="$input"
 
-    IFS=',' read -ra steps <<< "$pipeline_spec"
-    local prev="$input"
+  IFS=',' read -ra steps <<< "$pipeline_spec"
 
-    for i in "${!steps[@]}"; do
-        local step="${steps[$i]}"
-        local step_name
-        step_name=$(basename "$step" .py)
+  for i in "${!steps[@]}"; do
+    local step="${steps[$i]}"
+    local step_name
+    step_name=$(basename "$step" .py)
+    local step_output
 
-        if [ $i -eq $((${#steps[@]} - 1)) ]; then
-            final_output="${output_dir}/final.csv"
-        else
-            final_output="${output_dir}/step_${i}_${step_name}.csv"
-        fi
+    if [ $i -eq $((${#steps[@]} - 1)) ]; then
+      step_output="${output_dir}/final.csv"
+    else
+      step_output="${output_dir}/step_${i}_${step_name}.csv"
+    fi
 
-        info "  Pipeline Step $((i+1))/${#steps[@]}: $step_name"
-        if [[ "$step" == *.py ]]; then
-            python3 "$step" "$prev" "$final_output"
-        elif [[ "$step" == *.sh ]]; then
-            bash "$step" "$prev" "$final_output"
-        else
-            "$step" "$prev" "$final_output"
-        fi
-        prev="$final_output"
-    done
+    echo >&2 -e "${CYAN}▶${NC}  Pipeline Step $((i+1))/${#steps[@]}: $step_name"
+    if [[ "$step" == *.py ]]; then
+      python3 "$step" "$prev" "$step_output"
+    elif [[ "$step" == *.sh ]]; then
+      bash "$step" "$prev" "$step_output"
+    else
+      "$step" "$prev" "$step_output"
+    fi
+    prev="$step_output"
+  done
 
-    echo "$final_output"
+  echo "$prev"
 }
 
 # ── 完整流程 ──
 process() {
-    local customer_id="$1"
-    local source_url="$2"
-    local pipeline_spec="${PIPELINE}"
+  local customer_id="$1" source_url="$2"
+  local pipeline_raw="${PIPELINE}"
 
-    # 解析可选 --pipeline 覆盖
-    if [ $# -ge 4 ] && [ "$3" = "--pipeline" ]; then
-        pipeline_spec="$4"
-    fi
+  [ $# -ge 4 ] && [ "$3" = "--pipeline" ] && pipeline_raw="$4"
 
-    local work_dir="${WORKDIR}/${customer_id}"
-    mkdir -p "$work_dir"
+  local pipeline_spec
+  pipeline_spec=$(resolve_pipeline "$pipeline_raw")
 
-    echo ""
-    echo "══════════════════════════════════════════════"
-    echo "  客户: $customer_id"
-    echo "  来源: $source_url"
-    echo "  Pipeline: $pipeline_spec"
-    echo "══════════════════════════════════════════════"
-    echo ""
+  local work_dir="${WORKDIR}/${customer_id}"
+  mkdir -p "$work_dir"
 
-    # Step 1: 接收
-    info "Step 1: 接收客户数据"
-    local raw_file="${work_dir}/raw.csv"
-    $QTDATA_CLI transfer receive "$source_url" --output "$raw_file"
-    ok "已接收: $raw_file"
-    echo ""
+  echo ""
+  echo "══════════════════════════════════════════════"
+  echo "  客户: $customer_id"
+  echo "  来源: $source_url"
+  echo "  Pipeline: $pipeline_spec"
+  echo "══════════════════════════════════════════════"
+  echo ""
 
-    # Step 2: Pipeline
-    info "Step 2: 执行 Pipeline"
-    local result_file
-    result_file=$(run_pipeline "$raw_file" "$work_dir" "$pipeline_spec")
-    ok "Pipeline 完成"
-    echo ""
+  info "Step 1: 接收数据"
+  local raw_file="${work_dir}/raw.csv"
+  $QTDATA_CLI transfer receive "$source_url" --output "$raw_file"
+  ok "已接收: $raw_file"
+  echo ""
 
-    # Step 3: 交付
-    info "Step 3: 交付结果"
-    local link_file="${work_dir}/share-link.txt"
-    $QTDATA_CLI transfer send "$result_file" --output "$link_file"
-    ok "结果已交付"
-    echo "  分享链接: $(cat "$link_file")"
-    echo ""
+  info "Step 2: 执行 Pipeline"
+  local result_file
+  result_file=$(run_pipeline "$raw_file" "$work_dir" "$pipeline_spec")
+  ok "Pipeline 完成"
+  echo ""
 
-    echo "────────────────────────────────────────────"
-    ok "客户 $customer_id 流程完成"
-    echo "  原始数据: $raw_file"
-    echo "  最终结果: $result_file"
-    echo "  交付链接: $(cat "$link_file")"
-    echo ""
+  info "Step 3: 交付结果"
+  local link_file="${work_dir}/share-link.txt"
+  $QTDATA_CLI transfer send "$result_file" --output "$link_file"
+  ok "结果已交付: $(cat "$link_file")"
+  echo ""
+  echo "────────────────────────────────────────────"
+  ok "完成"
+  echo "  原始数据: $raw_file"
+  echo "  最终结果: $result_file"
 }
 
-# ── Mock 演示 ──
+# ── 演示 ──
 demo() {
-    echo ""
-    echo "══════════════════════════════════════════════"
-    echo "  qtdata-cli 演示 — 完整数据处理流程"
-    echo "══════════════════════════════════════════════"
-    echo ""
+  echo ""
+  echo "══════════════════════════════════════════════"
+  echo "  qtdata-cli 演示"
+  echo "══════════════════════════════════════════════"
+  echo ""
 
-    local demo_dir="${WORKDIR}/demo"
-    mkdir -p "$demo_dir"
+  local d="${WORKDIR}/demo"
+  mkdir -p "$d"
 
-    # mock 数据
-    echo "name,amount,note" > "${demo_dir}/mock_input.csv"
-    echo "alice,100,ok" >> "${demo_dir}/mock_input.csv"
-    echo "bob,200," >> "${demo_dir}/mock_input.csv"
-    echo "charlie,300,need review" >> "${demo_dir}/mock_input.csv"
+  echo "name,amount,note" > "${d}/input.csv"
+  echo "alice,100,ok" >> "${d}/input.csv"
+  echo "bob,200," >> "${d}/input.csv"
 
-    info "Mock 数据已准备: ${demo_dir}/mock_input.csv"
+  info "Mock 数据: ${d}/input.csv"
+  echo ""
 
-    # 模拟 receive
-    info "Step 1: 模拟接收"
-    cp "${demo_dir}/mock_input.csv" "${demo_dir}/raw.csv"
-    ok "已接收: ${demo_dir}/raw.csv"
-    echo ""
+  info "Step 1: 模拟接收"
+  cp "${d}/input.csv" "${d}/raw.csv"
+  ok "已接收"
+  echo ""
 
-    # Pipeline: 两步处理器
-    info "Step 2: 执行 Pipeline（校验 → 增强）"
-    local pipe_result
-    pipe_result=$(run_pipeline "${demo_dir}/raw.csv" "$demo_dir" \
-        "./bin/processor.py,./bin/enricher.py")
-    ok "Pipeline 完成: $pipe_result"
-    echo ""
+  local pipe_steps
+  pipe_steps=$(resolve_pipeline "csv-standard")
+  info "Step 2: Pipeline（csv-standard）"
+  local result
+  result=$(run_pipeline "${d}/raw.csv" "$d" "$pipe_steps")
+  ok "Pipeline 完成"
+  echo ""
 
-    # 模拟 send
-    info "Step 3: 模拟交付"
-    echo "https://console.qtcloud.com/delivery/demo-result" > "${demo_dir}/share-link.txt"
-    ok "结果已交付"
-    echo "  分享链接: https://console.qtcloud.com/delivery/demo-result"
-    echo ""
+  info "Step 3: 模拟交付"
+  echo "https://console.qtcloud.com/delivery/demo-result" > "${d}/share-link.txt"
+  ok "已完成"
+  echo ""
 
-    echo "────────────────────────────────────────────"
-    ok "Mock 演示完成"
-    echo "  工作目录: ${demo_dir}"
-    echo ""
-
-    info "中间产物:"
-    ls -la "${demo_dir}/" | grep -v '^total'
-    echo ""
-    info "最终输出:"
-    cat "${demo_dir}/final.csv"
-    echo ""
+  echo "────────────────────────────────────────────"
+  ok "演示完成"
+  echo ""
+  echo "最终输出:"
+  echo ""
+  cat "${d}/final.csv"
+  echo ""
 }
 
-# ── 命令分发 ──
+# ── Pipeline 管理 ──
+list_pipelines() {
+  command -v cue &>/dev/null || fail "需要 cue"
+  echo "可用的 Pipeline:"
+  # 提取顶级 pipeline 字段的 name 属性
+  # YAML 中顶级字段如 csvStandard: 下的 name: 才是 pipeline 名
+  cue export --out yaml "$PIPELINES_DIR" 2>/dev/null \
+    | grep -E '^  name: ' \
+    | sed 's/  name: "//;s/"$//' \
+    | while read -r n; do echo "  - $n"; done
+}
+
+show_pipeline() {
+  local name="$1"
+  command -v cue &>/dev/null || fail "需要 cue"
+  local cue_key
+  cue_key=$(to_camel "$name")
+  local yaml
+  yaml=$(cue export --out yaml --expression "$cue_key" "$PIPELINES_DIR" 2>/dev/null) \
+    || fail "找不到 Pipeline: $name"
+  echo "$yaml"
+}
+
+# ── 主命令 ──
 case "${1:-help}" in
-    process)
-        [ $# -ge 3 ] || fail "用法: qtdata-cli process <客户ID> <来源URL> [--pipeline step1,step2...]"
-        check_deps
-        process "$2" "$3" "${4:-}" "${5:-}"
-        ;;
-    demo)
-        demo
-        ;;
-    help|*)
-        echo "量潮数据处理编排实验"
-        echo ""
-        echo "用法:"
-        echo "  qtdata-cli process <ID> <URL> [--pipeline s1,s2...]  完整流程"
-        echo "  qtdata-cli demo                                      本地演示"
-        echo ""
-        echo "环境变量:"
-        echo "  QTDATA_CLI=qtcloud-data        CLI 命令路径"
-        echo "  PIPELINE=./bin/processor.py     Pipeline 步骤（逗号分隔）"
-        echo "  WORKDIR=./work                  工作目录"
-        ;;
+  process)
+    [ $# -ge 3 ] || fail "用法: qtdata-cli process <ID> <URL> [--pipeline <name>]"
+    process "$2" "$3" "${4:-}" "${5:-}"
+    ;;
+  pipeline)
+    case "${2:-help}" in
+      list|ls) list_pipelines ;;
+      show)   [ -n "${3:-}" ] && show_pipeline "$3" || fail "用法: qtdata-cli pipeline show <name>" ;;
+      *)      echo "用法: qtdata-cli pipeline list|show <name>" ;;
+    esac
+    ;;
+  demo)
+    demo
+    ;;
+  *)
+    echo "量潮数据流程编排"
+    echo ""
+    echo "用法:"
+    echo "  qtdata-cli process <ID> <URL>              完整流程"
+    echo "  qtdata-cli demo                             本地演示"
+    echo "  qtdata-cli pipeline list                    列出所有 pipeline"
+    echo "  qtdata-cli pipeline show <name>             查看 pipeline 定义"
+    echo ""
+    echo "环境变量:"
+    echo "  QTDATA_CLI=qtcloud-data    CLI 路径"
+    echo "  PIPELINE=csv-standard       默认 pipeline 名称"
+    echo "  WORKDIR=./work              工作目录"
+    echo "  PIPELINES_DIR=./pipelines   CUE 定义目录"
+    ;;
 esac
